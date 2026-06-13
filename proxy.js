@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 8080;
 // ── CONFIG ─────────────────────────────────────────────
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',')
-  : ['*']; // Change this in production!
+  : ['*'];
 
 const BLOCKED_HOSTS = [
   'localhost',
@@ -24,7 +24,10 @@ const BLOCKED_HOSTS = [
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// CORS setup
+// Trust Render's proxy
+app.set('trust proxy', 1);
+
+// CORS
 app.use(cors({
   origin: (origin, callback) => {
     if (ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin) || !origin) {
@@ -33,13 +36,13 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Target-URL'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Target-URL', 'Accept'],
   credentials: true,
   maxAge: 86400,
 }));
 
-// ── SECURITY: Block internal/private targets ───────────
+// ── BLOCK INTERNAL HOSTS ─────────────────────────────
 function isBlockedHost(url) {
   try {
     const hostname = new URL(url).hostname.toLowerCase();
@@ -54,7 +57,9 @@ app.use('/proxy', (req, res, next) => {
   const targetUrl = req.headers['x-target-url'] || req.query.url;
 
   if (!targetUrl) {
-    return res.status(400).json({ error: 'Missing target URL. Use X-Target-URL header or ?url= parameter.' });
+    return res.status(400).json({ 
+      error: 'Missing target URL. Use X-Target-URL header or ?url= parameter.' 
+    });
   }
 
   if (isBlockedHost(targetUrl)) {
@@ -64,52 +69,48 @@ app.use('/proxy', (req, res, next) => {
   const proxy = createProxyMiddleware({
     target: targetUrl,
     changeOrigin: true,
-    secure: true, // Reject invalid SSL certs
+    secure: true,
     followRedirects: true,
     timeout: 30000,
     proxyTimeout: 30000,
+    ws: false,
     onProxyReq: (proxyReq, req) => {
-      // Forward original headers (except host)
       const headersToForward = ['authorization', 'content-type', 'accept', 'accept-language'];
       headersToForward.forEach(h => {
         if (req.headers[h]) proxyReq.setHeader(h, req.headers[h]);
       });
-      // Don't leak proxy info
       proxyReq.removeHeader('x-target-url');
     },
     onProxyRes: (proxyRes, req, res) => {
-      // Ensure CORS headers are present on the response
       proxyRes.headers['access-control-allow-origin'] = req.headers.origin || '*';
       proxyRes.headers['access-control-allow-credentials'] = 'true';
     },
     onError: (err, req, res) => {
       console.error('Proxy error:', err.message);
-      res.status(502).json({ error: 'Proxy error', message: err.message });
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Proxy error', message: err.message });
+      }
     },
   });
 
   proxy(req, res, next);
 });
 
-// ── HEALTH CHECK ───────────────────────────────────────
+// ── HEALTH CHECK (Render pings this) ───────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: 'CORS Proxy running',
+    status: 'ok',
+    service: 'cors-proxy',
+    version: '1.0.0',
     usage: {
-      method: 'ANY',
       endpoint: '/proxy',
-      headers: { 'X-Target-URL': 'https://api.example.com/endpoint' },
+      header: 'X-Target-URL: https://api.example.com/endpoint',
       query: '/proxy?url=https://api.example.com/endpoint',
-    },
-    security: {
-      blockedHosts: BLOCKED_HOSTS,
-      allowedOrigins: ALLOWED_ORIGINS,
     },
   });
 });
 
 // ── START ──────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`CORS Proxy running on http://localhost:${PORT}`);
-  console.log(`Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
+  console.log(`CORS Proxy running on port ${PORT}`);
 });
